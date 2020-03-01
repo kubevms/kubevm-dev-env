@@ -1,4 +1,16 @@
 ---
+- name: Read the openstack parameters from the packstack machine
+  hosts: packstack
+  become: true
+  tasks:
+  - name: Read the admin credentials
+    register: keystonerc_admin
+    changed_when: false
+    shell: "cat /root/keystonerc_admin | grep 'export OS_' | sed -e 's/^[[:space:]]*export //' | sed -e 's/=/: /' | tr -d \"'\""
+  - name: set credentials fact
+    set_fact:
+      keystonerc_admin_env: "{{keystonerc_admin.stdout|from_yaml}}"
+
 - name: Setup the kubevm operator
   hosts: minikube
   become: true
@@ -80,11 +92,24 @@
       state: present
   
   - name: Patch the secrets, storing the references to the test environments
+    vars:
+      secrets:
+        OS_AUTH_URL: "{{hostvars.packstack.keystonerc_admin_env.OS_AUTH_URL}}"
+        OS_USERNAME: "{{packstack.user_name}}"
+        OS_PASSWORD: "{{packstack.user_password}}"
+        OS_PROJECT_NAME: "{{packstack.project_name}}"
+        OS_DOMAIN_NAME: "{{hostvars.packstack.keystonerc_admin_env.OS_PROJECT_DOMAIN_NAME}}"
     lineinfile:
       path: "{{app_folder}}/deploy/secrets.yaml"
       regexp: '^(.*){{item}}:'
-      line: '\1{{item}}: {{hostvars.packstack.keystonerc_admin_env[item]}}'
+      line: '\1{{item}}: {{secrets[item]}}'
       backrefs: yes
+    with_items:
+    - OS_AUTH_URL
+    - OS_USERNAME
+    - OS_PASSWORD
+    - OS_PROJECT_NAME
+    - OS_DOMAIN_NAME
 
   - name: Create the operator
     k8s:
@@ -95,5 +120,5 @@
       - "{{app_folder}}/deploy/service_account.yaml"
       - "{{app_folder}}/deploy/role.yaml"
       - "{{app_folder}}/deploy/role_binding.yaml"
-      - "{{app_folder}}/deploy/secret.yaml"
+      - "{{app_folder}}/deploy/secrets.yaml"
       - "{{app_folder}}/deploy/operator.yaml"
