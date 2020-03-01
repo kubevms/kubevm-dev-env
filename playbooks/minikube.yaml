@@ -1,0 +1,15 @@
+---
+- name: Provision a kubernetes cluster
+  hosts: minikube
+  become: true
+  roles:
+  - minikube
+  tasks:
+  - name: Install the unzip utility
+    yum:
+      name:
+      - unzip
+      state: present
+
+- name: Include the play that configures the kubevm operator
+  import_playbook: setup-kubevm-operator.yaml      

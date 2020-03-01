@@ -1,0 +1,130 @@
+---
+- name: Download minikube
+  get_url:
+    url: "https://github.com/kubernetes/minikube/releases/download/{{minikube_version}}/minikube-linux-amd64"
+    dest: /usr/local/bin/minikube
+    mode: 0755
+
+- name: Download kubectl
+  get_url:
+    url: "https://storage.googleapis.com/kubernetes-release/release/{{kubectl_version}}/bin/linux/amd64/kubectl"
+    dest: /usr/local/bin/kubectl
+    mode: 0755
+
+- name: Download helm
+  unarchive:
+    src: "https://get.helm.sh/helm-{{helm_version}}-linux-amd64.tar.gz"
+    dest: /usr/local/bin
+    remote_src: yes
+    extra_opts:
+    - --strip-components=1
+    - linux-amd64/helm
+
+- name: Enable netfilter on bridges
+  block:
+  - sysctl:
+      name: net.bridge.bridge-nf-call-ip6tables
+      value: "1"
+      sysctl_set: yes
+      state: present
+      reload: yes    
+  - sysctl:
+      name: net.bridge.bridge-nf-call-iptables
+      value: "1"
+      sysctl_set: yes
+      state: present
+      reload: yes    
+  - sysctl:
+      name: net.bridge.bridge-nf-call-arptables
+      value: "1"
+      sysctl_set: yes
+      state: present
+      reload: yes
+ 
+- name: Install minikube and pygit2 prereqs
+  yum:
+    name:
+    - bind-utils
+    - git
+    - socat
+    state: present
+
+- name: Cleanup resolv.conf
+  lineinfile:
+    path: /etc/resolv.conf
+    state: absent
+    regexp: '^search'    
+
+- name: Check the cluster status
+  environment:
+    PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  shell: |
+    set -o pipefail
+    minikube status | grep -v "Running\|Configured"
+  args:
+    executable: "/bin/bash"
+  register: status_result
+  failed_when: false
+  changed_when: false
+
+- name: Start the cluster
+  environment:
+    PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  shell: |
+    set -o pipefail
+    minikube start \
+      --feature-gates=TokenRequest=true \
+      --extra-config=apiserver.runtime-config=settings.k8s.io/v1alpha1=true \
+      --extra-config=apiserver.enable-admission-plugins=NamespaceLifecycle,LimitRanger,ServiceAccount,DefaultStorageClass,DefaultTolerationSeconds,NodeRestriction,MutatingAdmissionWebhook,ValidatingAdmissionWebhook,ResourceQuota,PodPreset \
+      --extra-config=apiserver.service-account-signing-key-file=/var/lib/minikube/certs/sa.key \
+      --extra-config=apiserver.service-account-key-file=/var/lib/minikube/certs/sa.pub \
+      --extra-config=apiserver.service-account-issuer=api \
+      --extra-config=apiserver.service-account-api-audiences=api,vault \
+      --apiserver-name="{{ansible_fqdn}}" \
+      --bootstrapper=kubeadm \
+      --extra-config=apiserver.authorization-mode=RBAC \
+      --vm-driver=none
+  args:
+    executable: "/bin/bash"
+  register: result
+  until: result is succeeded
+  changed_when: result is not succeeded
+  ignore_errors: true
+  when: status_result.stdout != "" 
+
+- name: Fix minikube status
+  environment:
+    PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  shell: |
+    set -o pipefail
+    minikube update-context
+  args:
+    executable: "/bin/bash"
+  changed_when: false
+  ignore_errors: true
+
+- name: Install the kubernetes and helm ansible module prereqs
+  pip: 
+    name:
+    - openshift
+    - pygit2==0.28.2
+    - pyhelm
+    state: present
+
+- name: Install tiller
+  environment:
+    PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  shell: helm init --net-host
+  register: helm_init_result
+  changed_when: '"already installed" not in helm_init_result.stdout'
+  
+- name: Wait for tiller to be active
+  k8s_info:
+    api_version: v1
+    kind: Deployment
+    name: tiller-deploy
+    namespace: kube-system
+  register: tiller_status
+  until: '"resources" in tiller_status and (tiller_status.resources|length>0) and "readyReplicas" in tiller_status.resources[0].status and tiller_status.resources[0].status.readyReplicas > 0'
+  retries: 30
+  delay: 5  

@@ -1,0 +1,255 @@
+---
+- name: Check input variables
+  fail:
+    msg: Some required variables are undefined
+  when: (packstack_private_net_iface  is undefined or packstack_private_net_iface  == "") or
+        (packstack_private_net_ipaddr is undefined or packstack_private_net_ipaddr == "") or
+        (packstack_public_net_iface   is undefined or packstack_public_net_iface   == "") or
+        (packstack_public_net_ipaddr  is undefined or packstack_public_net_ipaddr  == "") or
+        (packstack_public_net_netmask is undefined or packstack_public_net_netmask == "") or
+        (packstack_public_net_gateway is undefined or packstack_public_net_gateway == "") or
+        (packstack_public_net_dns     is undefined or packstack_public_net_dns     == "")
+
+- name: Disable firewalld
+  service:
+    name: firewalld
+    enabled: false
+    state: stopped
+
+- name: Disable Network Manager
+  service:
+    name: NetworkManager
+    enabled: false
+    state: stopped
+
+- name: Enable network
+  service:
+    name: network
+    enabled: true
+    state: started
+  register: network_start
+  ignore_errors: yes
+
+- name: Reboot if the network start failed
+  reboot:
+  when:
+  - network_start.failed is defined and network_start.failed
+
+- name: Update all rpm packages
+  yum:
+    name: "*"
+    state: latest
+
+- name: Install the openstack packages
+  yum:
+    name: centos-release-openstack-train
+    state: latest
+
+- name: Update again all rpm packages
+  yum:
+    name: "*"
+    state: latest
+
+- name: Install openstack-packstack
+  yum:
+    name:
+    - openstack-packstack
+    - openstack-utils
+    state: latest
+
+- name: Install the prerequisites for the ansible openstack modules
+  yum:
+    name: python2-openstacksdk
+    state: present
+
+- name: Create the configuration file
+  shell: "packstack  --provision-demo=n --os-neutron-ovn-bridge-mappings=extnet:br-ex --os-neutron-ovn-bridge-interfaces=br-ex:{{packstack_public_net_iface}} --gen-answer-file=/root/packstack-answers.txt"
+  args:
+    creates: /root/packstack-answers.txt
+
+- name: Replace the private IP address with the public one
+  replace:
+    path: /root/packstack-answers.txt
+    regexp: "{{packstack_private_net_ipaddr}}"
+    replace: "{{ packstack_public_net_ipaddr }}"
+
+- name: Create a key pair
+  openssh_keypair:
+    path: /root/.ssh/id_rsa
+
+- name: Read the public key
+  slurp:
+    path: /root/.ssh/id_rsa.pub
+  register: root_public_key
+
+- name: Set the authorized key
+  authorized_key:
+    user: root
+    state: present
+    key: '{{ root_public_key.content | b64decode }}'
+
+- name: Check if openstack is active
+  block:
+  - name: keyston_adminrc exists
+    stat:
+      path: /root/keystonerc_admin
+    register: stat_result
+  
+  - name: Read the admin credentials
+    register: keystonerc_admin
+    changed_when: false
+    shell: "cat /root/keystonerc_admin | grep 'export OS_' | sed -e 's/^[[:space:]]*export //' | sed -e 's/=/: /' | tr -d \"'\""
+    when: stat_result.stat.exists
+
+  - name: set credentials fact
+    set_fact:
+      keystonerc_admin_env: "{{keystonerc_admin.stdout|from_yaml}}"
+    when: stat_result.stat.exists
+  
+  - name: Retrieve the servers list
+    environment: "{{keystonerc_admin_env}}"
+    os_auth:
+    when: stat_result.stat.exists
+
+  - name: Set that openstack is running
+    set_fact:
+      openstack_installed: true
+    when: stat_result.stat.exists
+  rescue:
+  - name: Set that openstack is not running
+    set_fact:
+      openstack_installed: false
+
+- name: Start the OpenStack cluster
+  shell: packstack --answer-file=/root/packstack-answers.txt
+  when: openstack_installed is undefined or openstack_installed == false
+
+- name: Switch to qemu virtualization
+  lineinfile:
+    path: /etc/nova/nova.conf
+    regexp: '^virt_type='
+    insertafter: '^#virt_type='
+    line: virt_type=qemu
+  notify:
+  - Restart openstack services
+  when: use_qemu
+
+- name: Create a new collection interval
+  blockinfile:
+    path: /etc/ceilometer/gnocchi_resources.yaml
+    insertafter: "^archive_policies:"
+    block: |2
+        - name: ceilometer-medium-rate
+          aggregation_methods:
+          - mean
+          - rate:mean
+          back_window: 0
+          definition:
+          - granularity: 1 minute
+            timespan: 1 day
+          - granularity: 1 hour
+            timespan: 365 days
+  notify:
+  - Restart openstack services
+
+- name: Collect cpu at medium rate
+  lineinfile:
+    path:  /etc/ceilometer/gnocchi_resources.yaml
+    insertafter: '^      cpu:'
+    firstmatch: true
+    line:   '        archive_policy_name: ceilometer-low-rate'
+    state: absent
+  notify:
+  - Restart openstack services
+
+- name: Collect cpu at medium rate
+  lineinfile:
+    path:  /etc/ceilometer/gnocchi_resources.yaml
+    insertafter: '^      cpu:'
+    firstmatch: true
+    line:   '        archive_policy_name: ceilometer-medium-rate'
+  notify:
+  - Restart openstack services
+
+- name: Check the metric collection every 15 seconds
+  lineinfile:
+    path:  /etc/ceilometer/polling.yaml
+    regexp: '^      interval:'
+    line: '      interval: 15'
+  notify:
+  - Restart openstack services
+
+- name: Run the metric pipeline every 15 seconds
+  lineinfile:
+    path:  /etc/ceilometer/pipeline.yaml
+    insertafter: '    - name: meter_source'
+    regexp: '^      interval:'
+    line:    '      interval: 15'
+  notify:
+  - Restart openstack services
+
+- name: Force all notified handlers to run at this point, not waiting for normal sync points
+  meta: flush_handlers
+
+- name: Create the bridge script
+  template:
+    src: ifcfg-br-ex.j2
+    dest: /etc/sysconfig/network-scripts/ifcfg-br-ex
+  notify:
+  - Restart network
+
+- name: Update the public interfadce script
+  template:
+    src: ifcfg-eth.j2
+    dest: "/etc/sysconfig/network-scripts/ifcfg-{{packstack_public_net_iface}}"
+  notify:
+  - Restart network
+
+- name: Force all notified handlers to run at this point, not waiting for normal sync points
+  meta: flush_handlers
+
+- name: Read the admin credentials
+  register: keystonerc_admin
+  changed_when: false
+  shell: "cat /root/keystonerc_admin | grep 'export OS_' | sed -e 's/^[[:space:]]*export //' | sed -e 's/=/: /' | tr -d \"'\""
+
+- name: set credentials fact
+  set_fact:
+    keystonerc_admin_env: "{{keystonerc_admin.stdout|from_yaml}}"
+
+- name: Create the external network
+  environment: "{{keystonerc_admin_env}}"
+  os_network:
+    name: external_network
+    external: true
+    shared: true
+    provider_network_type: flat
+    provider_physical_network: extnet
+
+- name: Create the external subnetwork
+  environment: "{{keystonerc_admin_env}}"
+  os_subnet:
+    name: external_subnet
+    network_name: external_network
+    enable_dhcp: false
+    allocation_pool_start: "{{packstack_public_net_pool_start}}"
+    allocation_pool_end: "{{packstack_public_net_pool_end}}"
+    gateway_ip: "{{packstack_public_net_gateway}}"
+    cidr: "{{ (packstack_public_net_ipaddr + '/' + packstack_public_net_netmask) |  ipaddr('network/prefix')}}"
+    dns_nameservers:
+       - "{{packstack_public_net_dns}}"
+
+- name: Download the Cirros image
+  get_url:
+    url: "http://download.cirros-cloud.net/{{cirros_version}}/cirros-{{cirros_version}}-x86_64-disk.img"
+    dest: /root/cirros-{{cirros_version}}-x86_64-disk.img
+    timeout: 30
+
+- name: Import the Cirros image
+  environment: "{{keystonerc_admin_env}}"
+  os_image:
+    name: "cirros-{{cirros_version}}"
+    container_format: bare
+    disk_format: qcow2
+    filename: "/root/cirros-{{cirros_version}}-x86_64-disk.img"
+    is_public: yes

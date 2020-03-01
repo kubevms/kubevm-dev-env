@@ -1,0 +1,11 @@
+---
+- name: Restart openstack services
+  shell: 'openstack-service restart'
+
+- name: Restart network
+  service:
+    name: network
+    state: restarted
+
+- name: Reboot system
+  reboot:

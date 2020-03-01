@@ -1,0 +1,99 @@
+---
+- name: Setup the kubevm operator
+  hosts: minikube
+  become: true
+  vars:
+    go_version: "1.13.5"
+    sdk_version: v0.15.2
+    app_folder:  /root/kubevm
+    image_name: kubevm
+    image_version: "latest"
+  vars_files:
+  - test_env_vars.yaml
+  tasks:
+  - name: Download the go sdk
+    unarchive:
+      src: "https://dl.google.com/go/go{{go_version}}.linux-amd64.tar.gz"
+      dest: /usr/local
+      remote_src: yes
+
+  - name: Download the operator-sdk binary
+    get_url:
+      url: "https://github.com/operator-framework/operator-sdk/releases/download/{{sdk_version}}/operator-sdk-{{sdk_version}}-x86_64-linux-gnu"
+      dest: /usr/local/bin/operator-sdk
+      mode: 0755
+
+  - name: Copy the kubevm operator source code
+    copy:
+      src: ../src/kubevm
+      dest: "{{app_folder | dirname}}"
+
+  - name: List the binary files that requires permission changes
+    find:
+      paths: "{{app_folder}}/build/bin"
+    register: kubevm_bin_files
+
+  - name: Change file permissions, making them executables
+    file:
+      path: "{{ item.path }}"
+      mode: 0755
+    with_items: "{{ kubevm_bin_files.files }}"
+
+  - name: Build the kubevm operator
+    environment:
+      PATH: "/usr/local/sbin:/usr/local/bin:/usr/local/go/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    shell: "operator-sdk build {{image_name}}:{{image_version}}"
+    args:
+      chdir: "{{app_folder}}"
+
+  - name: Patch the operator definition file to replace the image name
+    lineinfile:
+      path: "{{app_folder}}/deploy/operator.yaml"
+      regexp: '^(.*)image:'
+      line: '\1image: "{{image_name}}:{{image_version}}"'
+      backrefs: yes
+
+  - name: Patch the operator definition file to replace the image pull policy
+    lineinfile:
+      path: "{{app_folder}}/deploy/operator.yaml"
+      regexp: '^(.*)imagePullPolicy:'
+      line: '\1imagePullPolicy: Never'
+      backrefs: yes
+
+  - name: List the CRDs
+    find:
+      paths: "{{app_folder}}/deploy/crds"
+      patterns: "*_crd.yaml"
+    register: kubevm_crd_files
+
+  - name: Create the CRDs    
+    k8s:
+      state: present
+      src: "{{ item.path }}"
+    with_items: "{{ kubevm_crd_files.files }}"
+
+  - name: Create the kubernetes namespace the operator will monitor
+    k8s:
+      name: "{{minikube.namespace}}"
+      api_version: v1
+      kind: Namespace
+      state: present
+  
+  - name: Patch the secrets, storing the references to the test environments
+    lineinfile:
+      path: "{{app_folder}}/deploy/secrets.yaml"
+      regexp: '^(.*){{item}}:'
+      line: '\1{{item}}: {{hostvars.packstack.keystonerc_admin_env[item]}}'
+      backrefs: yes
+
+  - name: Create the operator
+    k8s:
+      state: present
+      namespace: "{{minikube.namespace}}"
+      src: "{{item}}"
+    with_items:
+      - "{{app_folder}}/deploy/service_account.yaml"
+      - "{{app_folder}}/deploy/role.yaml"
+      - "{{app_folder}}/deploy/role_binding.yaml"
+      - "{{app_folder}}/deploy/secret.yaml"
+      - "{{app_folder}}/deploy/operator.yaml"

@@ -1,0 +1,3 @@
+[submodule "src/kubevm"]
+	path = src/kubevm
+	url = https://github.com/kubevms/kubevm.git

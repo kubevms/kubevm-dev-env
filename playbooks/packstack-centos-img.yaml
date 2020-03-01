@@ -1,0 +1,35 @@
+---
+- name: Load the CentOS image for testing purposes
+  hosts: packstack
+  become: true
+  vars:
+    centos_version: "1907"
+  tasks:
+  - name: Install the unzip utility
+    yum:
+      name:
+      - unzip
+      state: present
+  - name: check if the CentOS image already exists
+    stat:
+      path: "/root/CentOS-7-x86_64-GenericCloud-{{centos_version}}.qcow2"
+    register: centos_image_exists
+  - name: Download the CentOS image
+    get_url:
+      url: "https://cloud.centos.org/centos/7/images/CentOS-7-x86_64-GenericCloud-{{centos_version}}.qcow2.xz"
+      dest: "/root/CentOS-7-x86_64-GenericCloud-{{centos_version}}.qcow2.xz"
+      timeout: 30
+    when: centos_image_exists.stat.exists == false
+  - name: Extract the CentOS image
+    shell: "unxz /root/CentOS-7-x86_64-GenericCloud-{{centos_version}}.qcow2.xz"
+    args:
+      chdir: /root/
+    when: centos_image_exists.stat.exists == false
+  - name: Import the CentOS image
+    environment: "{{keystonerc_admin_env}}"
+    os_image:
+      name: "CentOS-7-{{centos_version}}"
+      container_format: bare
+      disk_format: qcow2
+      filename: "/root/CentOS-7-x86_64-GenericCloud-{{centos_version}}.qcow2"
+      is_public: yes

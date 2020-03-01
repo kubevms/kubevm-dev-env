@@ -1,0 +1,15 @@
+---
+- name: Provision an openstack cluster
+  hosts: packstack
+  become: true
+  vars:
+    centos_version: "1907"
+  roles:
+  - packstack
+
+- name: Include the play that creates a test Openstack project
+  import_playbook: packstack-test-project.yaml
+
+- name: Include the play that imports the CentOS cloud image
+  import_playbook: packstack-centos-img.yaml      
+

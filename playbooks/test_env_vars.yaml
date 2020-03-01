@@ -1,0 +1,10 @@
+packstack:
+  project_name: test-project
+  network_name: test-project-network
+  subnet_name: test-project-subnet
+  subnet_cidr: 192.168.200.0/24
+  router_name: test-project-router
+  user_name: test-user
+  user_password: passw0rd
+minikube:
+  namespace: test-namespace

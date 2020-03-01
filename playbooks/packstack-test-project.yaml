@@ -1,0 +1,54 @@
+---
+- name: Create a test project, as described by variables in the test_env_vars file
+  hosts: packstack
+  become: true
+  vars_files:
+  - test_env_vars.yaml
+  # The packstack role creates the variable keystonerc_admin_env that includes
+  # all the content of the file. The following line is equivalent to sourcing
+  # keystonerc_admin
+  environment: "{{keystonerc_admin_env}}"
+  tasks:
+  - name: Create the test project
+    os_project:
+      endpoint_type: admin
+      name: "{{packstack.project_name}}"
+      description: Project for kubevm testing
+      domain_id: "{{keystonerc_admin_env.OS_PROJECT_DOMAIN_NAME}}"
+  - name: Create the test user
+    os_user:
+      name: "{{packstack.user_name}}"
+      password: "{{packstack.user_password}}"
+      default_project: "{{packstack.project_name}}"
+      domain: "{{keystonerc_admin_env.OS_USER_DOMAIN_NAME}}"
+  - name: Associate the user to the project
+    os_user_role:
+      user: "{{packstack.user_name}}"
+      role: admin
+      project: "{{packstack.project_name}}"
+  - name: Create a private network
+    environment:
+      OS_USERNAME: "{{packstack.user_name}}"
+      OS_PASSWORD: "{{packstack.user_password}}"
+      OS_PROJECT_NAME: "{{packstack.project_name}}"
+    os_network:
+      name: "{{packstack.network_name}}"
+  - name: Create a private subnetwork
+    environment:
+      OS_USERNAME: "{{packstack.user_name}}"
+      OS_PASSWORD: "{{packstack.user_password}}"
+      OS_PROJECT_NAME: "{{packstack.project_name}}"
+    os_subnet:
+      network_name: "{{packstack.network_name}}"
+      name: "{{packstack.subnet_name}}"
+      cidr: "{{packstack.subnet_cidr}}"
+  - name: Create the router between the public and private networks
+    environment:
+      OS_USERNAME: "{{packstack.user_name}}"
+      OS_PASSWORD: "{{packstack.user_password}}"
+      OS_PROJECT_NAME: "{{packstack.project_name}}"
+    os_router:
+      name: "{{packstack.router_name}}"
+      network: external_network
+      interfaces:
+      - "{{packstack.subnet_name}}"

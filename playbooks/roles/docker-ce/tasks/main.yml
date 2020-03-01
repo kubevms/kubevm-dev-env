@@ -1,0 +1,63 @@
+---
+- name: remove useless packages
+  yum:
+    name:
+    - docker
+    - docker-client
+    - docker-client-latest
+    - docker-common
+    - docker-latest
+    - docker-latest-logrotate
+    - docker-logrotate
+    - docker-engine
+    state: absent
+
+- name: install the docker repository
+  get_url:
+    url: https://download.docker.com/linux/centos/docker-ce.repo
+    dest: /etc/yum.repos.d/docer-ce.repo  
+  
+- name: install docker-ce
+  yum:
+    name:
+    - docker-ce
+    - docker-ce-cli
+    - containerd.io
+    state: present
+
+- block:
+  - name: Create the proxy config folder
+    file:
+      path: /etc/systemd/system/docker.service.d
+      state: directory
+
+  - name: Create the proxy config file
+    copy:
+      dest: /etc/systemd/system/docker.service.d/http-proxy.conf
+      content: |
+        [Service]
+        Environment="HTTPS_PROXY={{ansible_env.HTTPS_PROXY}}" "HTTP_PROXY={{ansible_env.HTTP_PROXY}}" "NO_PROXY={{ansible_env.NO_PROXY}}"
+  when: ansible_env.HTTPS_PROXY is defined and ansible_env.HTTPS_PROXY != "" and ansible_env.HTTP_PROXY is defined and ansible_env.HTTP_PROXY != "" and ansible_env.NO_PROXY is defined and ansible_env.NO_PROXY != ""
+
+- name: start docker-ce
+  service:
+    name: docker
+    enabled: true
+    state: started
+
+- name: Install pip
+  shell: |
+    set -o pipefail
+    curl -skL https://bootstrap.pypa.io/get-pip.py | python -
+  args:
+    executable: "/bin/bash"
+    creates: "/bin/pip"
+  register: result
+  until: result is succeeded
+  changed_when: result is not succeeded
+
+- name: Install ansible docker module prereqs
+  pip: 
+    name:
+    - docker
+    state: present
